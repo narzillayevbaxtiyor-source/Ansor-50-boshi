@@ -1,190 +1,102 @@
 import os
 import logging
 from telegram import Update
-from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
-    CommandHandler,
     MessageHandler,
+    CommandHandler,
     ContextTypes,
     filters,
 )
+
 from openai import OpenAI
 
-# ================== ENV ==================
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-MODEL = (os.getenv("MODEL") or "gpt-5.2").strip()
+# ================== CONFIG ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 
-# Adminlar (vergul bilan)
-ADMIN_IDS = set()
-for x in (os.getenv("ADMIN_IDS") or "").split(","):
-    x = x.strip()
-    if x.isdigit():
-        ADMIN_IDS.add(int(x))
-
-# Kontaktlar
-TAXI_CONTACT = (os.getenv("TAXI_CONTACT") or "").strip()
-ALI_ATTAR_CONTACT = "@Ali_Attar0_bot"
-
-PROMO_EVERY_N = int((os.getenv("PROMO_EVERY_N") or "3") or "3")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN yo‘q")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY yo‘q")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ================== LOG ==================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("ziyorat-umra-ai")
+log = logging.getLogger(__name__)
 
-# ================== OPENAI ==================
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ================== PROMPT ==================
+BASE_PROMPT = """
+Siz Saudiya Arabistonida Umra va Ziyorat bo‘yicha AI yordamchisiz.
 
-# ================== STATE ==================
-STATE = {
-    "taxi_enabled": True,
-    "attar_enabled": True,
-}
+Siz:
+- Madina va Makka ziyorat joylarini qiziqarli tarixiy voqealar bilan tushuntirasiz
+- Miqot, ehrom, taqiqlar va duolarni sodda qilib aytasiz
+- Javoblar yumshoq, muloyim va diniy hurmat bilan bo‘ladi
 
-CHAT_MEMORY = {}
-USER_MSG_COUNT = {}
+Javob o‘rtasida juda silliq tarzda quyidagicha tavsiya berasiz:
+"Agar Masjid Nabaviy, Uhud tog‘i yoki Qubo masjidiga borishda qulay transport kerak bo‘lsa,
+bizning ishonchli taksi xizmatimizdan foydalanishingiz mumkin."
 
-# ================== SYSTEM PROMPT ==================
-SYSTEM_PROMPT = f"""
-SENING ROLING:
-Sen “Ziyorat & Umra” bo‘yicha yordamchi AI botsan.
-Javoblar o‘zbek tilida, muloyim va amaliy bo‘lsin.
+Yana juda tabiiy tarzda:
+"Ziyorat vaqtida toza va yoqimli hid muhim.
+Ali Attar tomonidan tayyorlangan spirtsiz attarlar ziyorat uchun ayni muddao.
+Aloqa: @Ali_Attar0_bot"
 
-JAVOB FORMAT:
-1) ✅ Asosiy ma’lumot
-2) 📖 Qiziqarli fakt
-3) 🤲 Duo (mos bo‘lsa)
-4) 🚕 / 🌿 Yumshoq tavsiya (faqat ruxsat bo‘lsa)
-
-🚕 TAKSI:
-Faqat transport mavzusida, majburlamasdan.
-Kontakt: {TAXI_CONTACT}
-
-🌿 ALI ATTAR:
-Faqat safar/hadya mavzusida.
-Ehromda atir ishlatmaslikni eslat.
-Kontakt: {ALI_ATTAR_CONTACT}
+Hech qachon majburlamaysiz, faqat tavsiya qilasiz.
 """
 
-# ================== HELPERS ==================
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-def should_add_promo(user_id: int) -> bool:
-    USER_MSG_COUNT[user_id] = USER_MSG_COUNT.get(user_id, 0) + 1
-    return USER_MSG_COUNT[user_id] % PROMO_EVERY_N == 0
-
-async def ask_ai(chat_id: int, user_id: int, text: str) -> str:
-    history = CHAT_MEMORY.get(chat_id, [])[-10:]
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        *history,
-        {"role": "user", "content": text},
-    ]
-
-    resp = client.responses.create(
-        model=MODEL,
-        input=messages,
-        temperature=0.7,
-        max_output_tokens=700,
-    )
-
-    answer = resp.output_text.strip()
-
-    # 🔌 Admin o‘chirganda reklama chiqmasin
-    if not STATE["taxi_enabled"]:
-        answer = answer.replace("🚕", "")
-    if not STATE["attar_enabled"]:
-        answer = answer.replace("🌿", "")
-
-    history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": answer})
-    CHAT_MEMORY[chat_id] = history
-
-    return answer or "Kechirasiz, hozir javob bera olmadim."
-
-# ================== ADMIN COMMANDS ==================
-async def taxi_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    STATE["taxi_enabled"] = True
-    await update.message.reply_text("✅ Taksi tavsiyalari YOQILDI")
-
-async def taxi_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    STATE["taxi_enabled"] = False
-    await update.message.reply_text("❌ Taksi tavsiyalari O‘CHIRILDI")
-
-async def attar_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    STATE["attar_enabled"] = True
-    await update.message.reply_text("✅ Ali Attar tavsiyalari YOQILDI")
-
-async def attar_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    STATE["attar_enabled"] = False
-    await update.message.reply_text("❌ Ali Attar tavsiyalari O‘CHIRILDI")
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+# ================== HANDLERS ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📊 Holat:\n"
-        f"🚕 Taksi: {'ON' if STATE['taxi_enabled'] else 'OFF'}\n"
-        f"🌿 Ali Attar: {'ON' if STATE['attar_enabled'] else 'OFF'}"
+        "Assalomu alaykum 🌙\n\n"
+        "Men Umra va Ziyorat bo‘yicha AI yordamchiman.\n"
+        "Savolingizni yozing, men yordam beraman."
     )
 
-# ================== USER COMMANDS ==================
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🕌 Ziyorat & Umra AI bot\n\n"
-        "Savol bering:\n"
-        "• Madinada 3 kunlik reja\n"
-        "• Miyqotda nima qilinadi?\n"
-        "• Ehromda nimalar mumkin emas?",
-    )
-
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.text:
+async def ai_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
         return
 
-    await context.bot.send_chat_action(chat_id=msg.chat.id, action=ChatAction.TYPING)
+    user_text = update.message.text
 
-    answer = await ask_ai(msg.chat.id, msg.from_user.id, msg.text)
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": BASE_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+        )
 
-    await msg.reply_text(answer, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        answer = response.choices[0].message.content
+        await update.message.reply_text(answer)
+
+    except Exception as e:
+        log.exception("AI error")
+        await update.message.reply_text("❗ Xatolik yuz berdi, keyinroq urinib ko‘ring.")
+
+# ================== ADMIN ==================
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    await update.message.reply_text(
+        "🛠 Admin panel\n\n"
+        "Hozircha sozlamalar statik.\n"
+        "Keyingi bosqichda promptni shu yerdan o‘zgartiramiz."
+    )
 
 # ================== MAIN ==================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # User
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, ai_answer))
 
-    # Admin
-    app.add_handler(CommandHandler("taxi_on", taxi_on))
-    app.add_handler(CommandHandler("taxi_off", taxi_off))
-    app.add_handler(CommandHandler("attar_on", attar_on))
-    app.add_handler(CommandHandler("attar_off", attar_off))
-    app.add_handler(CommandHandler("status", status_cmd))
-
-    log.info("✅ Ziyorat & Umra AI bot (ADMIN PANEL bilan) ishga tushdi")
-    app.run_polling(drop_pending_updates=True)
+    log.info("✅ AI Ziyorat bot ishga tushdi")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
