@@ -1,5 +1,4 @@
 import os
-import re
 import json
 import logging
 from typing import List
@@ -14,14 +13,12 @@ from telegram.ext import (
     filters,
 )
 
-# OpenAI SDK
 from openai import AsyncOpenAI
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 
-# ADMIN_IDS: "123,456,789"
 ADMIN_IDS_RAW = (os.getenv("ADMIN_IDS") or "").strip()
 ADMIN_IDS: List[int] = []
 if ADMIN_IDS_RAW:
@@ -30,9 +27,8 @@ if ADMIN_IDS_RAW:
         if x.isdigit():
             ADMIN_IDS.append(int(x))
 
-# Optional: faqat bitta guruhda ishlasin desang (-100...)
-ALLOWED_CHAT_ID = (os.getenv("ALLOWED_CHAT_ID") or "").strip()
-ALLOWED_CHAT_ID = int(ALLOWED_CHAT_ID) if ALLOWED_CHAT_ID.lstrip("-").isdigit() else None
+ALLOWED_CHAT_ID_RAW = (os.getenv("ALLOWED_CHAT_ID") or "").strip()
+ALLOWED_CHAT_ID = int(ALLOWED_CHAT_ID_RAW) if ALLOWED_CHAT_ID_RAW.lstrip("-").isdigit() else None
 
 STATE_FILE = "state.json"
 DEFAULT_STATE = {
@@ -62,10 +58,7 @@ Qoidalar:
 """.strip()
 
 # ----------------- LOGGING -----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("umra_ai_bot")
 
 # ----------------- STATE -----------------
@@ -75,7 +68,6 @@ def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # defaults merge
         s = DEFAULT_STATE.copy()
         s.update(data if isinstance(data, dict) else {})
         return s
@@ -109,16 +101,11 @@ def build_admin_kb():
     ]
     return InlineKeyboardMarkup(kb)
 
-def should_add_promo() -> bool:
-    return bool(STATE.get("promo_enabled", True))
-
 def inject_promo(answer: str) -> str:
-    if not should_add_promo():
+    if not bool(STATE.get("promo_enabled", True)):
         return answer
     promo = (STATE.get("promo_text") or "").strip()
-    if not promo:
-        return answer
-    return f"{answer}\n\n—\n{promo}"
+    return f"{answer}\n\n—\n{promo}" if promo else answer
 
 # ----------------- OPENAI -----------------
 client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -127,7 +114,6 @@ async def ask_ai(user_text: str) -> str:
     if not client:
         return "❗ OPENAI_API_KEY qo‘yilmagan. Railway Variables’ga OPENAI_API_KEY ni kiriting."
 
-    # Responses API (OpenAI SDK) orqali
     try:
         resp = await client.responses.create(
             model="gpt-4.1-mini",
@@ -137,7 +123,6 @@ async def ask_ai(user_text: str) -> str:
             ],
             temperature=0.7,
         )
-        # SDK natijasidan text yig‘ib olish
         out = []
         for item in resp.output:
             if getattr(item, "type", None) == "message":
@@ -192,9 +177,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_reply_markup(reply_markup=build_admin_kb())
 
     elif data == "adm:show_promo":
-        promo = STATE.get("promo_text", "")
         await q.answer("OK")
-        await q.message.reply_text(f"📣 Promo matni:\n\n{promo}")
+        await q.message.reply_text(f"📣 Promo matni:\n\n{STATE.get('promo_text','')}")
 
     elif data == "adm:reset_promo":
         STATE["promo_text"] = DEFAULT_STATE["promo_text"]
@@ -204,17 +188,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_reply_markup(reply_markup=build_admin_kb())
 
 async def setpromo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /setpromo <text...>
     if not update.effective_user or not update.message:
         return
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Siz admin emassiz.")
         return
-    text = (update.message.text or "").split(" ", 1)
-    if len(text) < 2 or not text[1].strip():
+    parts = (update.message.text or "").split(" ", 1)
+    if len(parts) < 2 or not parts[1].strip():
         await update.message.reply_text("Foydalanish: /setpromo <yangi promo matn>")
         return
-    STATE["promo_text"] = text[1].strip()
+    STATE["promo_text"] = parts[1].strip()
     save_state(STATE)
     await update.message.reply_text("✅ Promo matni yangilandi.")
 
@@ -224,26 +207,19 @@ async def ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat_allowed(update.effective_chat.id):
         return
 
-    # faqat text
     user_text = (update.message.text or "").strip()
     if not user_text:
         return
-
-    # juda uzun bo‘lsa kesamiz
     if len(user_text) > 4000:
         user_text = user_text[:4000]
 
     await update.message.chat.send_action("typing")
     answer = await ask_ai(user_text)
-    answer = inject_promo(answer)
-    await update.message.reply_text(answer)
+    await update.message.reply_text(inject_promo(answer))
 
-# ----------------- MAIN -----------------
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN topilmadi. Railway Variables’ga BOT_TOKEN qo‘ying.")
-    if not OPENAI_API_KEY:
-        log.warning("OPENAI_API_KEY yo‘q. Bot AI javob bera olmaydi.")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -251,8 +227,6 @@ def main():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("setpromo", setpromo_cmd))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^adm:"))
-
-    # Private + group: har qanday oddiy text savolga AI javob
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_message))
 
     log.info("✅ Umra AI bot ishga tushdi. Adminlar: %s | Allowed chat: %s", ADMIN_IDS, ALLOWED_CHAT_ID)
