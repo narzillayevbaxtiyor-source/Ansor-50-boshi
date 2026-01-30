@@ -1,9 +1,11 @@
 import os
+import re
 import json
 import logging
-from typing import List
+from typing import List, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatType, ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -13,22 +15,28 @@ from telegram.ext import (
     filters,
 )
 
+# OpenAI SDK
 from openai import AsyncOpenAI
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 
+# Bot username (deep-link tugma uchun). Masalan: "Ali_Attar0_bot"
+BOT_USERNAME = (os.getenv("BOT_USERNAME") or "").strip().lstrip("@")
+
+# ADMIN_IDS: "123,456,789"
 ADMIN_IDS_RAW = (os.getenv("ADMIN_IDS") or "").strip()
 ADMIN_IDS: List[int] = []
 if ADMIN_IDS_RAW:
     for x in ADMIN_IDS_RAW.split(","):
         x = x.strip()
-        if x.isdigit():
+        if x.lstrip("-").isdigit():
             ADMIN_IDS.append(int(x))
 
+# Optional: faqat bitta guruhda ishlasin desang (-100...)
 ALLOWED_CHAT_ID_RAW = (os.getenv("ALLOWED_CHAT_ID") or "").strip()
-ALLOWED_CHAT_ID = int(ALLOWED_CHAT_ID_RAW) if ALLOWED_CHAT_ID_RAW.lstrip("-").isdigit() else None
+ALLOWED_CHAT_ID: Optional[int] = int(ALLOWED_CHAT_ID_RAW) if ALLOWED_CHAT_ID_RAW.lstrip("-").isdigit() else None
 
 STATE_FILE = "state.json"
 DEFAULT_STATE = {
@@ -58,7 +66,10 @@ Qoidalar:
 """.strip()
 
 # ----------------- LOGGING -----------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 log = logging.getLogger("umra_ai_bot")
 
 # ----------------- STATE -----------------
@@ -101,11 +112,41 @@ def build_admin_kb():
     ]
     return InlineKeyboardMarkup(kb)
 
+def should_add_promo() -> bool:
+    return bool(STATE.get("promo_enabled", True))
+
 def inject_promo(answer: str) -> str:
-    if not bool(STATE.get("promo_enabled", True)):
+    if not should_add_promo():
         return answer
     promo = (STATE.get("promo_text") or "").strip()
-    return f"{answer}\n\n—\n{promo}" if promo else answer
+    if not promo:
+        return answer
+    return f"{answer}\n\n—\n{promo}"
+
+# /start deep-link paramdan savolni tayyorlab yuborish
+START_PAYLOADS = {
+    "madina_3kun": "Madinaga keldim, 3 kunda qayerlarga boray?",
+    "miqot": "Miqotda nima qilinadi, qanday niyat?",
+    "ehrom_taqiq": "Ehromda nimalar mumkin emas?",
+}
+
+def start_keyboard() -> InlineKeyboardMarkup:
+    # “Savolni ustiga bosganda botga ketishi” uchun deep-link tugma (DM ochadi)
+    if BOT_USERNAME:
+        kb = [
+            [InlineKeyboardButton("📍 Madinada 3 kunlik reja", url=f"https://t.me/{BOT_USERNAME}?start=madina_3kun")],
+            [InlineKeyboardButton("🕋 Miqot: niyat va amallar", url=f"https://t.me/{BOT_USERNAME}?start=miqot")],
+            [InlineKeyboardButton("🧷 Ehrom: taqiqlar", url=f"https://t.me/{BOT_USERNAME}?start=ehrom_taqiq")],
+        ]
+        return InlineKeyboardMarkup(kb)
+
+    # BOT_USERNAME bo‘lmasa oddiy tugmalar (callback) — chat ichida ishlaydi
+    kb = [
+        [InlineKeyboardButton("📍 Madinada 3 kunlik reja", callback_data="ask:madina_3kun")],
+        [InlineKeyboardButton("🕋 Miqot: niyat va amallar", callback_data="ask:miqot")],
+        [InlineKeyboardButton("🧷 Ehrom: taqiqlar", callback_data="ask:ehrom_taqiq")],
+    ]
+    return InlineKeyboardMarkup(kb)
 
 # ----------------- OPENAI -----------------
 client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -123,12 +164,14 @@ async def ask_ai(user_text: str) -> str:
             ],
             temperature=0.7,
         )
+
         out = []
         for item in resp.output:
             if getattr(item, "type", None) == "message":
                 for c in item.content:
                     if getattr(c, "type", None) == "output_text":
                         out.append(c.text)
+
         text = ("\n".join(out)).strip()
         return text or "Kechirasiz, javob chiqarmadim. Savolni boshqacha yozib ko‘ring."
     except Exception as e:
@@ -141,6 +184,24 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not chat_allowed(update.effective_chat.id):
         return
+    if not update.message:
+        return
+
+    # /start payload bo‘lsa — darhol o‘sha savolga javob beramiz
+    payload = ""
+    try:
+        if context.args:
+            payload = (context.args[0] or "").strip()
+    except Exception:
+        payload = ""
+
+    if payload in START_PAYLOADS:
+        user_text = START_PAYLOADS[payload]
+        await update.effective_chat.send_action(ChatAction.TYPING)
+        answer = await ask_ai(user_text)
+        answer = inject_promo(answer)
+        await update.message.reply_text(answer)
+        return
 
     msg = (
         "Assalomu alaykum! 🤍\n"
@@ -149,9 +210,38 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• “Madinaga keldim, 3 kunda qayerlarga boray?”\n"
         "• “Miqotda nima qilinadi, qanday niyat?”\n"
         "• “Ehromda nimalar mumkin emas?”\n\n"
-        "Admin bo‘lsangiz: /admin"
+        "⬇️ Tezkor savollar:"
     )
-    await update.message.reply_text(msg)
+
+    await update.message.reply_text(msg, reply_markup=start_keyboard())
+
+async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+
+    data = (q.data or "").strip()
+    if not data.startswith("ask:"):
+        return
+
+    key = data.split(":", 1)[1].strip()
+    user_text = START_PAYLOADS.get(key)
+    if not user_text:
+        return
+
+    # callback faqat shu chatda ishlaydi (odatda private)
+    try:
+        await q.message.chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
+
+    answer = await ask_ai(user_text)
+    answer = inject_promo(answer)
+    try:
+        await q.message.reply_text(answer)
+    except Exception:
+        pass
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message:
@@ -177,8 +267,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_reply_markup(reply_markup=build_admin_kb())
 
     elif data == "adm:show_promo":
+        promo = STATE.get("promo_text", "")
         await q.answer("OK")
-        await q.message.reply_text(f"📣 Promo matni:\n\n{STATE.get('promo_text','')}")
+        await q.message.reply_text(f"📣 Promo matni:\n\n{promo}")
 
     elif data == "adm:reset_promo":
         STATE["promo_text"] = DEFAULT_STATE["promo_text"]
@@ -188,38 +279,74 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_reply_markup(reply_markup=build_admin_kb())
 
 async def setpromo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /setpromo <text...>
     if not update.effective_user or not update.message:
         return
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Siz admin emassiz.")
         return
-    parts = (update.message.text or "").split(" ", 1)
-    if len(parts) < 2 or not parts[1].strip():
+    text = (update.message.text or "").split(" ", 1)
+    if len(text) < 2 or not text[1].strip():
         await update.message.reply_text("Foydalanish: /setpromo <yangi promo matn>")
         return
-    STATE["promo_text"] = parts[1].strip()
+    STATE["promo_text"] = text[1].strip()
     save_state(STATE)
     await update.message.reply_text("✅ Promo matni yangilandi.")
 
 async def ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or not update.message:
+    if not update.effective_chat or not update.message or not update.effective_user:
         return
     if not chat_allowed(update.effective_chat.id):
         return
 
+    # faqat text
     user_text = (update.message.text or "").strip()
     if not user_text:
         return
+
+    # juda uzun bo‘lsa kesamiz
     if len(user_text) > 4000:
         user_text = user_text[:4000]
 
-    await update.message.chat.send_action("typing")
-    answer = await ask_ai(user_text)
-    await update.message.reply_text(inject_promo(answer))
+    # ====== SIZ SO'RAGAN QO'SHIMCHA ======
+    # Guruhda savol bo‘lsa: savolni o‘chirish + javobni shaxsiyga yuborish.
+    if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # 1) avval savolni o‘chiramiz
+        try:
+            await update.message.delete()
+        except Exception:
+            # Botda "Delete messages" huquqi bo‘lmasa o‘chira olmaydi
+            pass
 
+        # 2) javobni DMga yuboramiz
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_user.id, action=ChatAction.TYPING)
+        except Exception:
+            pass
+
+        answer = await ask_ai(user_text)
+        answer = inject_promo(answer)
+
+        try:
+            await context.bot.send_message(chat_id=update.effective_user.id, text=answer)
+        except Exception:
+            # User botga /start bermagan bo‘lsa DM ketmaydi (403). Guruhga yozmaymiz.
+            pass
+        return
+    # ====================================
+
+    # Private chat: odatdagidek javob
+    await update.message.chat.send_action(ChatAction.TYPING)
+    answer = await ask_ai(user_text)
+    answer = inject_promo(answer)
+    await update.message.reply_text(answer)
+
+# ----------------- MAIN -----------------
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN topilmadi. Railway Variables’ga BOT_TOKEN qo‘ying.")
+    if not OPENAI_API_KEY:
+        log.warning("OPENAI_API_KEY yo‘q. Bot AI javob bera olmaydi.")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -227,9 +354,15 @@ def main():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("setpromo", setpromo_cmd))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^adm:"))
+    app.add_handler(CallbackQueryHandler(ask_callback, pattern=r"^ask:"))
+
+    # Private + group: text savolga AI javob (groupda o‘chirib DMga yuboradi)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_message))
 
-    log.info("✅ Umra AI bot ishga tushdi. Adminlar: %s | Allowed chat: %s", ADMIN_IDS, ALLOWED_CHAT_ID)
+    log.info(
+        "✅ Umra AI bot ishga tushdi. Adminlar: %s | Allowed chat: %s | Bot username: %s",
+        ADMIN_IDS, ALLOWED_CHAT_ID, BOT_USERNAME or "(env yo‘q)"
+    )
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
