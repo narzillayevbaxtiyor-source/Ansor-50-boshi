@@ -1,11 +1,5 @@
 # bot.py
 # python-telegram-bot v20+ (polling)
-# Vazifa:
-# - 15 ta FAQ, 5 bet (har betda 8 ta tugma)
-# - Tugma bosilganda: o‘sha xabarning ichida javob chiqadi + "⬅️ Orqaga" tugmasi
-# - "Orqaga" bosilsa: o‘sha xabar qaytib menyuga (o‘sha betdagi tugmalar) chiqadi
-# - Guruhda savol yozilsa: bot o‘chiradi va shaxsiyga menyuni yuboradi
-# - Promo: faqat ayrim javoblarga chiqadi (xohlasangiz ro‘yxatini o‘zgartirasiz)
 
 import os
 import logging
@@ -30,7 +24,6 @@ ALLOWED_CHAT_ID_RAW = (os.getenv("ALLOWED_CHAT_ID") or "").strip()
 ALLOWED_CHAT_ID = int(ALLOWED_CHAT_ID_RAW) if ALLOWED_CHAT_ID_RAW.lstrip("-").isdigit() else None
 
 # Deep-link ishlashi uchun bot username kerak bo'ladi (ixtiyoriy).
-# Sizda bo'lmasa ham bot ishlaydi, faqat "savolni ustiga bosib botga ketish" deep-link bo'lmaydi.
 BOT_USERNAME = (os.getenv("BOT_USERNAME") or "").strip()  # masalan: "Ali_Attar0_bot"
 
 # Promo linklar
@@ -38,13 +31,14 @@ TRANSPORT_LINK = "https://t.me/saudia0dan_group/199"
 ATTAR_LINK = "https://t.me/saudia0dan_group/20"
 CONTACT_BOT = "@Ali_Attar0_bot"
 
+# ✅ Bot faqat shu topic ichida ishlaydi (siz xohlagan: 1)
+ONLY_TOPIC_ID = 1
+
 # ----------------- LOG -----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("umra_faq_bot")
 
 # ----------------- FAQ DATA (15 ta) -----------------
-# Har bir FAQ: {"uz": "...", "kr": "..."}.
-# Birinchi qator tugma sarlavhasi sifatida olinadi.
 FAQ: Dict[str, Dict[str, str]] = {
     "miqot": {
         "uz": (
@@ -304,11 +298,9 @@ TOP_FAQ_KEYS = [
     "niyat",
 ]
 
-# 5 bet, har betda 8 ta tugma
 ITEMS_PER_PAGE = 8
-TOTAL_PAGES = 5  # user xohlaganidek
+TOTAL_PAGES = 5
 
-# Promo faqat ayrimlarida chiqsin
 PROMO_KEYS = {"miqot", "madina_3kun", "uhud", "qubo"}
 
 def chat_allowed(chat_id: int) -> bool:
@@ -347,7 +339,6 @@ def build_faq_menu(page: int, lang: str) -> InlineKeyboardMarkup:
 
     rows = []
     for k in keys:
-        # callback: faq:<key>:<lang>:<page>
         rows.append([InlineKeyboardButton(title_of(k, lang), callback_data=f"faq:{k}:{lang}:{page}")])
 
     nav = []
@@ -358,7 +349,6 @@ def build_faq_menu(page: int, lang: str) -> InlineKeyboardMarkup:
     if nav:
         rows.append(nav)
 
-    # Tilni tez almashtirish (ixtiyoriy, yoqsa qoldiring)
     rows.append([
         InlineKeyboardButton("UZB", callback_data=f"lang:uz:{page}"),
         InlineKeyboardButton("КРИЛ", callback_data=f"lang:kr:{page}"),
@@ -367,12 +357,10 @@ def build_faq_menu(page: int, lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def build_answer_kb(lang: str, page: int) -> InlineKeyboardMarkup:
-    # Orqaga: back:<lang>:<page>
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data=f"back:{lang}:{page}")]])
 
 def start_text(lang: str) -> str:
     if lang == "kr":
-        # Deep-link bo‘lsa: misol savolni bosganda botga ketishi
         if BOT_USERNAME:
             deep = f"https://t.me/{BOT_USERNAME}?start=faq_madina_3kun"
             example_line = f"• “Мадинага келдим, 3 кунда қаерларга борай?” ({deep})"
@@ -423,23 +411,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = (q.data or "").strip()
     await q.answer()
 
-    # bet almashtirish
     if data.startswith("page:"):
         _, page_s, lang = data.split(":")
         page = int(page_s)
         await q.edit_message_reply_markup(reply_markup=build_faq_menu(page, lang))
         return
 
-    # til almashtirish
     if data.startswith("lang:"):
         _, lang, page_s = data.split(":")
         page = int(page_s)
-        # matnni ham yangilab qo'ysak (start matn o'sha xabarda tursa)
-        # Lekin biz faqat tugmalarni almashtiramiz (yengilroq).
         await q.edit_message_reply_markup(reply_markup=build_faq_menu(page, lang))
         return
 
-    # faq bosildi => o‘sha xabar ichida javob ko‘rsatamiz (edit text)
     if data.startswith("faq:"):
         _, key, lang, page_s = data.split(":")
         page = int(page_s)
@@ -452,16 +435,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if key in PROMO_KEYS:
             text += promo_block(lang)
 
-        # XABARNI O'ZINING ICHIDA JAVOBGA O'ZGARTIRAMIZ + ORQAGA
         await q.edit_message_text(text=text, reply_markup=build_answer_kb(lang, page), disable_web_page_preview=True)
         return
 
-    # orqaga => o‘sha xabarni menyuga qaytaramiz (o‘sha bet)
     if data.startswith("back:"):
         _, lang, page_s = data.split(":")
         page = int(page_s)
-
-        # start matn + menu
         await q.edit_message_text(
             text=start_text(lang),
             reply_markup=build_faq_menu(page=page, lang=lang),
@@ -470,8 +449,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def deep_start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /start faq_madina_3kun kabi deep-link bo‘lsa, darhol shu javobni ko‘rsatadi
-    # Telegram: https://t.me/<BOT_USERNAME>?start=faq_madina_3kun
     if not update.message:
         return
 
@@ -480,7 +457,6 @@ async def deep_start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await start_cmd(update, context)
 
     payload = args[0].strip()
-    # format: faq_<key>
     if payload.startswith("faq_"):
         key = payload.replace("faq_", "", 1)
         lang = "uz"
@@ -489,11 +465,9 @@ async def deep_start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if key in PROMO_KEYS:
                 text += promo_block(lang)
             await update.message.reply_text(text, disable_web_page_preview=True)
-            # keyin menyuni ham ko‘rsatib qo‘yamiz
             await update.message.reply_text(start_text(lang), reply_markup=build_faq_menu(0, lang))
             return
 
-    # boshqacha payload bo'lsa oddiy start
     return await start_cmd(update, context)
 
 async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,17 +478,20 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # ✅ Faqat bitta topic ichida ishlasin
+        current_tid = getattr(update.effective_message, "message_thread_id", None)
+        if current_tid != ONLY_TOPIC_ID:
+            return
+
         user = update.effective_user
         if not user:
             return
 
-        # xabarni o‘chirish
         try:
             await update.message.delete()
         except Exception:
             pass
 
-        # shaxsiyga yuborish
         try:
             await context.bot.send_message(
                 chat_id=user.id,
@@ -523,7 +500,6 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 disable_web_page_preview=True,
             )
         except Exception:
-            # user botga /start bosmagan bo‘lishi mumkin
             pass
 
 # ----------------- MAIN -----------------
@@ -542,7 +518,10 @@ def main():
     # Guruhdagi oddiy textlarni ushlab qolamiz
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
 
-    log.info("✅ Umra FAQ bot ishga tushdi | Allowed chat: %s | BOT_USERNAME: %s", ALLOWED_CHAT_ID, BOT_USERNAME or "(yo‘q)")
+    log.info(
+        "✅ Umra FAQ bot ishga tushdi | Allowed chat: %s | BOT_USERNAME: %s | Only topic: %s",
+        ALLOWED_CHAT_ID, BOT_USERNAME or "(yo‘q)", ONLY_TOPIC_ID
+    )
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
