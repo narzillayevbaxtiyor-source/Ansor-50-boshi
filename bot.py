@@ -520,7 +520,7 @@ def main():
 
     log.info(
         "✅ Umra FAQ bot ishga tushdi | Allowed chat: %s | BOT_USERNAME: %s | Only topic: %s",
-        ALLOWED_CHAT_ID, BOT_USERNAME or "(yo‘q)", ONLY_TOPIC_ID
+        ALLOWED_CHAT_ID, BOT_USERNAME or "(yo‘q)", ONLY_TOPIC_ID=202
     )
     app.run_polling(drop_pending_updates=True)
 
